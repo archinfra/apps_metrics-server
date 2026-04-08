@@ -1,0 +1,82 @@
+name: Build Metrics Server Offline Installer
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+    tags:
+      - "v*"
+    paths:
+      - ".github/workflows/build-offline-installer.yml"
+      - "build.sh"
+      - "install.sh"
+      - "README.md"
+      - "images/**"
+      - "manifests/**"
+  pull_request:
+    paths:
+      - ".github/workflows/build-offline-installer.yml"
+      - "build.sh"
+      - "install.sh"
+      - "README.md"
+      - "images/**"
+      - "manifests/**"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        arch:
+          - amd64
+          - arm64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Ensure executable permissions
+        run: |
+          chmod +x build.sh install.sh
+
+      - name: Build installer
+        run: |
+          ./build.sh --arch "${{ matrix.arch }}"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: metrics-server-installer-${{ matrix.arch }}
+          path: |
+            dist/metrics-server-installer-${{ matrix.arch }}.run
+            dist/metrics-server-installer-${{ matrix.arch }}.run.sha256
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*

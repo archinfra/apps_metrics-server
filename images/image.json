@@ -1,0 +1,17 @@
+[
+  {
+    "arch": "amd64",
+    "platform": "linux/amd64",
+    "pull": "registry.k8s.io/metrics-server/metrics-server:v0.8.1",
+    "tag": "sealos.hub:5000/kube4/metrics-server:v0.8.1",
+    "tar": "metrics-server-amd64.tar"
+  },
+  {
+    "arch": "arm64",
+    "platform": "linux/arm64",
+    "pull": "registry.k8s.io/metrics-server/metrics-server:v0.8.1",
+    "tag": "sealos.hub:5000/kube4/metrics-server:v0.8.1",
+    "tar": "metrics-server-arm64.tar"
+  }
+]
+
