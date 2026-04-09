@@ -135,6 +135,7 @@ spec:
 __HOST_NETWORK_BLOCK____HA_ANTI_AFFINITY_BLOCK__      containers:
       - args:
         - --cert-dir=/tmp
+        - --kubelet-insecure-tls
         - --secure-port=10250
         - --kubelet-preferred-address-types=__KUBELET_PREFERRED_ADDRESS_TYPES__
 __KUBELET_USE_NODE_STATUS_PORT_ARG____KUBELET_INSECURE_TLS_ARG__        - --metric-resolution=__METRIC_RESOLUTION__
