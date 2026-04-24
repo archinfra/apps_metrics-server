@@ -3,11 +3,12 @@
 set -Eeuo pipefail
 
 APP_NAME="metrics-server"
-INSTALLER_VERSION="0.1.0"
+INSTALLER_VERSION="0.1.2"
 WORKDIR="/tmp/${APP_NAME}-installer"
 MANIFEST_DIR="${WORKDIR}/manifests"
 IMAGE_DIR="${WORKDIR}/images"
 IMAGE_JSON="${IMAGE_DIR}/image.json"
+IMAGE_INDEX="${IMAGE_DIR}/image-index.tsv"
 TEMPLATE_FILE="${MANIFEST_DIR}/metrics-server.yaml.tmpl"
 RENDERED_MANIFEST="${WORKDIR}/rendered-metrics-server.yaml"
 
@@ -30,7 +31,8 @@ REGISTRY_REPO="sealos.hub:5000/kube4"
 REGISTRY_ADDR="sealos.hub:5000"
 REGISTRY_USER="admin"
 REGISTRY_PASS="passw0rd"
-IMAGE_SUFFIX="metrics-server:v0.8.1"
+METRICS_SERVER_IMAGE_LOAD_REF=""
+METRICS_SERVER_IMAGE_DEFAULT_REF=""
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -65,8 +67,8 @@ section() {
 }
 
 banner() {
-  echo -e "${BOLD}Metrics Server 离线安装器${NC}"
-  echo "版本: ${INSTALLER_VERSION}"
+  echo -e "${BOLD}Metrics Server Offline Installer${NC}"
+  echo "Version: ${INSTALLER_VERSION}"
 }
 
 refresh_registry_addr() {
@@ -79,32 +81,32 @@ refresh_registry_addr() {
 
 usage() {
   cat <<'EOF'
-用法:
-  ./metrics-server-installer.run <action> [参数]
+Usage:
+  ./metrics-server-installer.run <action> [options]
   ./metrics-server-installer.run help
 
-动作:
-  install      安装或对齐 metrics-server
-  uninstall    卸载 metrics-server
-  status       查看当前运行状态
-  help         查看帮助
+Actions:
+  install      Install or reconcile metrics-server
+  uninstall    Remove metrics-server resources
+  status       Show current metrics-server status
+  help         Show this message
 
-常用参数:
-  -n, --namespace <ns>                 安装命名空间，默认 kube-system
-  --replicas <n>                       副本数，默认 1
-  --registry <repo-prefix>             镜像仓库前缀，默认 sealos.hub:5000/kube4
-  --registry-user <user>               镜像仓库用户名，默认 admin
-  --registry-pass <pass>               镜像仓库密码，默认 passw0rd
-  --skip-image-prepare                 跳过镜像导入与推送
-  --image-pull-policy <policy>         默认 IfNotPresent
-  --metric-resolution <duration>       默认 15s
+Common options:
+  -n, --namespace <ns>                 Default: kube-system
+  --replicas <n>                       Default: 1
+  --registry <repo-prefix>             Default: sealos.hub:5000/kube4
+  --registry-user <user>               Default: admin
+  --registry-pass <pass>               Default: passw0rd
+  --skip-image-prepare                 Skip docker load/tag/push
+  --image-pull-policy <policy>         Default: IfNotPresent
+  --metric-resolution <duration>       Default: 15s
   --kubelet-preferred-address-types <types>
-  --kubelet-insecure-tls               允许忽略 kubelet 证书校验
-  --host-network                       使用 hostNetwork
-  --wait-timeout <duration>            默认 5m
-  -y, --yes                            跳过确认
+  --kubelet-insecure-tls               Allow skipping kubelet cert validation
+  --host-network                       Run metrics-server with hostNetwork
+  --wait-timeout <duration>            Default: 5m
+  -y, --yes                            Skip confirmation
 
-示例:
+Examples:
   ./metrics-server-installer.run install -y
   ./metrics-server-installer.run install --kubelet-insecure-tls -y
   ./metrics-server-installer.run install --replicas 2 --host-network -y
@@ -235,7 +237,6 @@ check_requirements() {
       command -v dd >/dev/null 2>&1 || die "dd is required"
       command -v od >/dev/null 2>&1 || die "od is required"
       if [[ "${SKIP_IMAGE_PREPARE}" != "true" ]]; then
-        command -v jq >/dev/null 2>&1 || die "jq is required when image preparation is enabled"
         command -v docker >/dev/null 2>&1 || die "docker is required when image preparation is enabled"
       fi
       ;;
@@ -251,44 +252,44 @@ check_requirements() {
 }
 
 print_plan() {
-  section "执行计划"
-  echo "动作                    : ${ACTION}"
-  echo "命名空间                : ${NAMESPACE}"
+  section "Execution Plan"
+  echo "Action                    : ${ACTION}"
+  echo "Namespace                 : ${NAMESPACE}"
 
   if [[ "${ACTION}" == "install" ]]; then
-    echo "副本数                  : ${REPLICAS}"
-    echo "镜像仓库                : ${REGISTRY_REPO}"
-    echo "跳过镜像准备            : ${SKIP_IMAGE_PREPARE}"
-    echo "镜像拉取策略            : ${IMAGE_PULL_POLICY}"
-    echo "采集周期                : ${METRIC_RESOLUTION}"
-    echo "地址优先级              : ${KUBELET_PREFERRED_ADDRESS_TYPES}"
-    echo "忽略 kubelet 证书校验   : ${KUBELET_INSECURE_TLS}"
-    echo "启用 hostNetwork        : ${HOST_NETWORK}"
-    echo "等待超时                : ${WAIT_TIMEOUT}"
+    echo "Replicas                  : ${REPLICAS}"
+    echo "Registry                  : ${REGISTRY_REPO}"
+    echo "Skip image prepare        : ${SKIP_IMAGE_PREPARE}"
+    echo "Image pull policy         : ${IMAGE_PULL_POLICY}"
+    echo "Metric resolution         : ${METRIC_RESOLUTION}"
+    echo "Preferred address types   : ${KUBELET_PREFERRED_ADDRESS_TYPES}"
+    echo "Kubelet insecure TLS      : ${KUBELET_INSECURE_TLS}"
+    echo "Host network              : ${HOST_NETWORK}"
+    echo "Wait timeout              : ${WAIT_TIMEOUT}"
   fi
 }
 
 confirm_plan() {
   [[ "${AUTO_YES}" == "true" ]] && return 0
   echo
-  read -r -p "确认继续执行？[y/N]: " answer
+  read -r -p "Continue? [y/N] " answer
   case "${answer}" in
     y|Y|yes|YES)
       ;;
     *)
-      die "用户取消执行"
+      die "Cancelled"
       ;;
   esac
 }
 
 extract_payload() {
-  section "解压安装载荷"
+  section "Extract Payload"
   rm -rf "${WORKDIR}"
   mkdir -p "${WORKDIR}"
 
   local marker_line offset skip hex
   marker_line="$(awk '/^__PAYLOAD_BELOW__$/ { print NR; exit }' "$0")"
-  [[ -n "${marker_line}" ]] || die "无法定位 payload 标记"
+  [[ -n "${marker_line}" ]] || die "Unable to locate payload marker"
 
   offset="$(( $(head -n "${marker_line}" "$0" | wc -c | tr -d ' ') + 1 ))"
   skip=0
@@ -300,7 +301,7 @@ extract_payload() {
         skip=$((skip + 1))
         ;;
       "")
-        die "未读取到 payload 数据"
+        die "Payload is empty"
         ;;
       *)
         break
@@ -308,18 +309,36 @@ extract_payload() {
     esac
   done
 
-  log "正在解压到 ${WORKDIR}"
-  tail -c +"$((offset + skip))" "$0" | tar -xzf - -C "${WORKDIR}" || die "解压载荷失败"
-  [[ -f "${TEMPLATE_FILE}" ]] || die "载荷中缺少 manifests/metrics-server.yaml.tmpl"
-  success "载荷解压完成"
+  log "Extracting payload into ${WORKDIR}"
+  tail -c +"$((offset + skip))" "$0" | tar -xzf - -C "${WORKDIR}" || die "Failed to extract payload"
+  [[ -f "${TEMPLATE_FILE}" ]] || die "Payload is missing manifests/metrics-server.yaml.tmpl"
+  [[ -f "${IMAGE_INDEX}" ]] || die "Payload is missing images/image-index.tsv"
+  success "Payload extracted"
+}
+
+load_image_metadata() {
+  if [[ -n "${METRICS_SERVER_IMAGE_DEFAULT_REF}" ]]; then
+    return 0
+  fi
+
+  [[ -f "${IMAGE_INDEX}" ]] || extract_payload
+
+  while IFS=$'\t' read -r _tar_name load_ref default_target_ref _platform _pull; do
+    [[ -n "${default_target_ref}" ]] || continue
+    METRICS_SERVER_IMAGE_LOAD_REF="${load_ref}"
+    METRICS_SERVER_IMAGE_DEFAULT_REF="${default_target_ref}"
+    return 0
+  done < "${IMAGE_INDEX}"
+
+  die "No metrics-server image metadata found in ${IMAGE_INDEX}"
 }
 
 docker_login() {
-  log "登录镜像仓库 ${REGISTRY_ADDR}"
+  log "Logging into registry ${REGISTRY_ADDR}"
   if echo "${REGISTRY_PASS}" | docker login "${REGISTRY_ADDR}" -u "${REGISTRY_USER}" --password-stdin >/dev/null 2>&1; then
-    success "镜像仓库登录成功"
+    success "Registry login succeeded"
   else
-    warn "镜像仓库登录失败，继续尝试后续流程"
+    warn "Registry login failed, continuing"
   fi
 }
 
@@ -335,47 +354,45 @@ resolve_target_image_tag() {
 }
 
 prepare_images() {
+  load_image_metadata
   [[ "${SKIP_IMAGE_PREPARE}" == "true" ]] && {
-    warn "已按要求跳过镜像导入与推送"
+    warn "Skipping image prepare because --skip-image-prepare was requested"
     return 0
   }
 
-  section "准备离线镜像"
-  [[ -f "${IMAGE_JSON}" ]] || die "载荷中缺少 images/image.json"
+  section "Prepare Offline Images"
   docker_login
 
   local count=0
-  while IFS= read -r item; do
-    [[ -n "${item}" ]] || continue
+  while IFS=$'\t' read -r tar_name load_ref default_target_ref _platform _pull; do
+    [[ -n "${tar_name}" ]] || continue
 
-    local tar_name image_tag target_tag tar_path
-    tar_name="$(jq -r '.tar' <<<"${item}")"
-    image_tag="$(jq -r '.tag // .pull' <<<"${item}")"
-    target_tag="$(resolve_target_image_tag "${image_tag}")"
+    local target_tag tar_path
+    target_tag="$(resolve_target_image_tag "${default_target_ref}")"
     tar_path="${IMAGE_DIR}/${tar_name}"
 
-    [[ -f "${tar_path}" ]] || continue
+    [[ -f "${tar_path}" ]] || die "Missing image archive: ${tar_path}"
 
-    log "导入镜像归档 ${tar_name}"
+    log "Loading ${tar_name}"
     docker load -i "${tar_path}" >/dev/null
-    if [[ "${target_tag}" != "${image_tag}" ]]; then
-      log "重打标签 ${image_tag} -> ${target_tag}"
-      docker tag "${image_tag}" "${target_tag}"
+    if [[ "${target_tag}" != "${load_ref}" ]]; then
+      log "Tagging ${load_ref} -> ${target_tag}"
+      docker tag "${load_ref}" "${target_tag}"
     fi
-    log "推送镜像 ${target_tag}"
+    log "Pushing ${target_tag}"
     docker push "${target_tag}" >/dev/null
     count=$((count + 1))
-  done < <(jq -c '.[]' "${IMAGE_JSON}")
+  done < "${IMAGE_INDEX}"
 
-  (( count > 0 )) || die "载荷中未发现可导入的镜像归档"
-  success "已准备 ${count} 个镜像归档"
+  (( count > 0 )) || die "No image archives found in payload"
+  success "Prepared ${count} image archive(s)"
 }
 
 ensure_namespace() {
   if kubectl get namespace "${NAMESPACE}" >/dev/null 2>&1; then
     return 0
   fi
-  log "创建命名空间 ${NAMESPACE}"
+  log "Creating namespace ${NAMESPACE}"
   kubectl create namespace "${NAMESPACE}" >/dev/null
 }
 
@@ -388,7 +405,8 @@ template_replace() {
 }
 
 metrics_server_image() {
-  printf '%s/%s' "${REGISTRY_REPO}" "${IMAGE_SUFFIX}"
+  load_image_metadata
+  resolve_target_image_tag "${METRICS_SERVER_IMAGE_DEFAULT_REF}"
 }
 
 render_manifest() {
@@ -439,13 +457,13 @@ render_manifest() {
 }
 
 wait_for_ready() {
-  section "等待组件就绪"
+  section "Wait For Readiness"
   kubectl rollout status deployment/metrics-server -n "${NAMESPACE}" --timeout="${WAIT_TIMEOUT}"
 
   if kubectl wait --for=condition=Available apiservice/v1beta1.metrics.k8s.io --timeout="${WAIT_TIMEOUT}" >/dev/null 2>&1; then
-    success "APIService 已就绪"
+    success "APIService is Available"
   else
-    warn "APIService 尚未报告 Available，可以稍后执行 kubectl get apiservice v1beta1.metrics.k8s.io 继续确认"
+    warn "APIService is not Available yet; recheck with: kubectl get apiservice v1beta1.metrics.k8s.io"
   fi
 }
 
@@ -455,30 +473,30 @@ install_app() {
   ensure_namespace
   render_manifest
 
-  section "安装 / 对齐 metrics-server"
+  section "Install / Reconcile metrics-server"
   kubectl apply -f "${RENDERED_MANIFEST}"
   wait_for_ready
-  success "metrics-server 安装/对齐完成"
+  success "metrics-server install/reconcile completed"
 }
 
 uninstall_app() {
   extract_payload
   render_manifest
 
-  section "卸载 metrics-server"
+  section "Uninstall metrics-server"
   kubectl delete -f "${RENDERED_MANIFEST}" --ignore-not-found=true >/dev/null || true
-  success "metrics-server 卸载完成"
+  success "metrics-server uninstall completed"
 }
 
 show_status() {
-  section "metrics-server 状态"
-  kubectl get deployment metrics-server -n "${NAMESPACE}" -o wide 2>/dev/null || warn "Deployment metrics-server 不存在"
+  section "metrics-server Status"
+  kubectl get deployment metrics-server -n "${NAMESPACE}" -o wide 2>/dev/null || warn "Deployment metrics-server not found"
   kubectl get pods -n "${NAMESPACE}" -l k8s-app=metrics-server -o wide 2>/dev/null || true
   kubectl get svc metrics-server -n "${NAMESPACE}" 2>/dev/null || true
-  kubectl get apiservice v1beta1.metrics.k8s.io -o wide 2>/dev/null || warn "APIService v1beta1.metrics.k8s.io 不存在"
+  kubectl get apiservice v1beta1.metrics.k8s.io -o wide 2>/dev/null || warn "APIService v1beta1.metrics.k8s.io not found"
 
   echo
-  echo "常用验证命令:"
+  echo "Useful checks:"
   echo "  kubectl top nodes"
   echo "  kubectl top pods -A"
   echo "  kubectl logs -n ${NAMESPACE} deploy/metrics-server"

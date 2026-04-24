@@ -90,8 +90,8 @@ parse_args() {
 }
 
 check_requirements() {
-  command -v jq >/dev/null 2>&1 || die "jq is required"
   command -v docker >/dev/null 2>&1 || die "docker is required"
+  command -v python >/dev/null 2>&1 || command -v python3 >/dev/null 2>&1 || die "python or python3 is required"
   [[ -f "${ROOT_DIR}/install.sh" ]] || die "install.sh is missing"
   [[ -d "${MANIFESTS_DIR}" ]] || die "manifests directory is missing"
   [[ -d "${IMAGES_DIR}" ]] || die "images directory is missing"
@@ -99,45 +99,84 @@ check_requirements() {
   grep -q '^__PAYLOAD_BELOW__$' "${ROOT_DIR}/install.sh" || die "install.sh is missing __PAYLOAD_BELOW__ marker"
 }
 
+python_cmd() {
+  if command -v python >/dev/null 2>&1; then
+    printf 'python'
+  else
+    printf 'python3'
+  fi
+}
+
 prepare_directories() {
   rm -rf "${TEMP_DIR}" "${PAYLOAD_FILE}"
   mkdir -p "${TEMP_DIR}/images" "${TEMP_DIR}/manifests" "${DIST_DIR}"
 }
 
+write_image_metadata() {
+  local arch="$1"
+  local output_json="$2"
+  local output_index="$3"
+  "$(python_cmd)" - "${IMAGE_JSON}" "${arch}" "${output_json}" "${output_index}" <<'PY'
+import json
+import sys
+
+source_path, arch, output_json, output_index = sys.argv[1:]
+
+with open(source_path, "r", encoding="utf-8") as fh:
+    items = json.load(fh)
+
+selected = [dict(item) for item in items if item.get("arch") == arch]
+if not selected:
+    raise SystemExit(f"no image definition found for arch={arch}")
+
+with open(output_json, "w", encoding="utf-8") as fh:
+    json.dump(selected, fh, ensure_ascii=False, indent=2)
+    fh.write("\n")
+
+with open(output_index, "w", encoding="utf-8", newline="") as fh:
+    for item in selected:
+        default_target_ref = item.get("tag") or item.get("pull") or ""
+        fh.write("\t".join([
+            item.get("tar", ""),
+            default_target_ref,
+            default_target_ref,
+            item.get("platform", ""),
+            item.get("pull", ""),
+        ]) + "\n")
+PY
+}
+
 prepare_images() {
-  local count
-  count="$(jq --arg arch "${ARCH}" '[.[] | select(.arch == $arch)] | length' "${IMAGE_JSON}")"
-  [[ "${count}" -gt 0 ]] || die "No image definition found for arch=${ARCH}"
+  local count=0
+  local payload_image_json="${TEMP_DIR}/images/image.json"
+  local payload_image_index="${TEMP_DIR}/images/image-index.tsv"
 
-  log "Preparing ${count} image(s) for ${ARCH}"
+  write_image_metadata "${ARCH}" "${payload_image_json}" "${payload_image_index}"
 
-  while IFS= read -r item; do
-    [[ -n "${item}" ]] || continue
-
-    local pull tag tar_name platform
-    pull="$(jq -r '.pull' <<<"${item}")"
-    tag="$(jq -r '.tag // .pull' <<<"${item}")"
-    tar_name="$(jq -r '.tar' <<<"${item}")"
-    platform="$(jq -r '.platform // empty' <<<"${item}")"
+  while IFS=$'\t' read -r tar_name load_ref default_target_ref platform pull; do
+    [[ -n "${tar_name}" ]] || continue
     [[ -n "${platform}" ]] || platform="${PLATFORM}"
 
     log "Pull ${pull} (${platform})"
     docker pull --platform "${platform}" "${pull}"
 
-    if [[ "${pull}" != "${tag}" ]]; then
-      log "Tag ${pull} -> ${tag}"
-      docker tag "${pull}" "${tag}"
+    if [[ "${pull}" != "${default_target_ref}" ]]; then
+      log "Tag ${pull} -> ${default_target_ref}"
+      docker tag "${pull}" "${default_target_ref}"
     fi
 
-    log "Save ${tag} -> ${TEMP_DIR}/images/${tar_name}"
-    docker save -o "${TEMP_DIR}/images/${tar_name}" "${tag}"
-  done < <(jq -c --arg arch "${ARCH}" '.[] | select(.arch == $arch)' "${IMAGE_JSON}")
+    log "Save ${default_target_ref} -> ${TEMP_DIR}/images/${tar_name}"
+    docker save -o "${TEMP_DIR}/images/${tar_name}" "${default_target_ref}"
+    count=$((count + 1))
+  done < "${payload_image_index}"
+
+  (( count > 0 )) || die "No image definition found for arch=${ARCH}"
+  log "Preparing ${count} image(s) for ${ARCH}"
 }
 
 package_payload() {
   log "Packaging manifests and images"
   cp -r "${MANIFESTS_DIR}/"* "${TEMP_DIR}/manifests/"
-  cp "${IMAGE_JSON}" "${TEMP_DIR}/images/"
 
   (
     cd "${TEMP_DIR}"
@@ -188,4 +227,3 @@ main() {
 }
 
 main "$@"
-

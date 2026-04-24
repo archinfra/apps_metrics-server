@@ -59,7 +59,7 @@
 先确保本地有：
 - `bash`
 - `docker`
-- `jq`
+- `python` or `python3`
 
 构建命令：
 
