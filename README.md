@@ -11,9 +11,10 @@
   - `--host-network`
   - `--replicas 2`
 
-当前版本基于官方最新 release：
-- metrics-server `v0.8.1`
-- 官方安装清单来源：[`components.yaml`](https://github.com/kubernetes-sigs/metrics-server/releases/download/v0.8.1/components.yaml)
+当前版本基于官方稳定 release：
+- metrics-server `v0.9.0`
+- 官方安装清单来源：[`components.yaml`](https://github.com/kubernetes-sigs/metrics-server/releases/download/v0.9.0/components.yaml)
+- `metrics-server 0.9.x` 面向 Kubernetes `1.34+`，适合当前 Kubernetes 1.36.x 交付基线
 
 ## metrics-server 是做什么的
 
@@ -30,6 +31,16 @@
 官方说明：
 - [Metrics Server 官方主页](https://kubernetes-sigs.github.io/metrics-server/)
 - [Metrics Server Releases](https://github.com/kubernetes-sigs/metrics-server/releases)
+
+## 离线交付依赖原则
+
+最终交付给客户执行的 `.run` 安装器不依赖 `jq`、`python`、`curl`、`wget` 或 `yq`。
+
+镜像元数据在构建阶段由 Python 标准库读取 `images/image.json`，转换为安装器运行时使用的 `images/image-index.tsv`。因此：
+
+- 构建环境需要 `python` 或 `python3`
+- 客户安装环境不需要 Python，也不需要 `jq`
+- 安装运行时只依赖基础 shell 工具、`kubectl`，以及启用镜像准备时的 `docker`
 
 ## 仓库结构
 
@@ -50,7 +61,9 @@
 - `install.sh`
   最终 installer 入口脚本
 - `images/image.json`
-  离线镜像定义
+  构建阶段离线镜像定义
+- `images/image-index.tsv`
+  构建时生成，供最终离线 installer 在运行时读取
 - `manifests/metrics-server.yaml.tmpl`
   基于官方 `components.yaml` 改造的参数化模板
 
@@ -126,7 +139,7 @@ dist/metrics-server-installer-arm64.run.sha256
 - `--kubelet-preferred-address-types`
   默认 `InternalIP,ExternalIP,Hostname`
 - `--kubelet-insecure-tls`
-  忽略 kubelet 证书校验，适合测试集群或自签 kubelet 证书环境
+  显式忽略 kubelet 证书校验；默认关闭，仅用于测试集群或 kubelet 证书无法被集群 CA 验证的环境
 - `--host-network`
   metrics-server Pod 使用 `hostNetwork`
 - `--wait-timeout`
@@ -138,11 +151,15 @@ dist/metrics-server-installer-arm64.run.sha256
 
 ### 1. 默认安装
 
+默认不会注入 `--kubelet-insecure-tls`：
+
 ```bash
 ./dist/metrics-server-installer-amd64.run install -y
 ```
 
 ### 2. 测试集群开启 kubelet 证书跳过校验
+
+只有显式传入参数时才会注入 `--kubelet-insecure-tls`：
 
 ```bash
 ./dist/metrics-server-installer-amd64.run install \
@@ -216,7 +233,7 @@ kubectl logs -n kube-system deploy/metrics-server
 - metrics-server 到 kubelet 网络不通
 - kubelet 证书不是集群 CA 签发
 
-这类测试环境最常见的处理方式是：
+测试环境如果确认需要跳过 kubelet 证书校验，再显式使用：
 
 ```bash
 ./dist/metrics-server-installer-amd64.run install \
